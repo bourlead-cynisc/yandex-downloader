@@ -45,9 +45,16 @@ jobs:
           path: YandexDownloader-Android-v1.0.2.apk
           if-no-files-found: error
           retention-days: 30
-      - name: Attach to GitHub Release
-        env:
-          GH_TOKEN: \${{ github.token }}
-        run: |
-          gh release view v1.0.2 >/dev/null 2>&1 || gh release create v1.0.2 --target "$GITHUB_SHA" --title "Yandex Downloader v1.0.2 · Android" --notes "Android test APK (arm64-v8a, Android 8.0+). See README for limitations. Windows and Linux versions are available in v1.0.1."
-          gh release upload v1.0.2 YandexDownloader-Android-v1.0.2.apk --clobber
+      - name: Publish Android APK in Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v1.0.2
+          name: Yandex Downloader v1.0.2 · Android
+          target_commitish: \${{ github.sha }}
+          body: |
+            Test APK for Android 8.0+ ARM64, built with Android SDK and Chaquopy.
+            This is a debug-signed APK for user testing, not a Google Play release.
+            Downloads require the user’s own Yandex account and service permissions.
+            Windows and Omarchy builds: v1.0.1.
+          fail_on_unmatched_files: true
+          files: YandexDownloader-Android-v1.0.2.apk

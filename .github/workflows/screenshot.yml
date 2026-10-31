@@ -1,0 +1,62 @@
+name: Capture actual desktop UI screenshot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/screenshot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  screenshot:
+    name: Render Linux UI on virtual display
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb python3-tk fonts-dejavu-core
+          python -m pip install -r requirements.txt pillow
+      - name: Capture actual app window
+        run: |
+          mkdir -p docs
+          xvfb-run -a -s "-screen 0 1280x1120x24" python - <<'PY'
+          from PIL import ImageGrab
+          from app import App
+          import time
+
+          app = App()
+          app.geometry("1000x960+80+50")
+          app.update_idletasks()
+          app.update()
+          time.sleep(1.2)
+          app.update()
+          x, y = app.winfo_rootx(), app.winfo_rooty()
+          w, h = app.winfo_width(), app.winfo_height()
+          screenshot = ImageGrab.grab(bbox=(x, y, x + w, y + h), xdisplay=None)
+          assert screenshot.width >= 900 and screenshot.height >= 800
+          screenshot.save("docs/interface.png")
+          print(f"Saved real app screenshot: {w}x{h}")
+          app.destroy()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yandex-downloader-interface
+          path: docs/interface.png
+          if-no-files-found: error
+      - name: Commit screenshot to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/interface.png
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: include actual desktop screenshot [skip ci]"
+            git push
+          fi

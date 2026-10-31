@@ -11,11 +11,12 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from auth_store import SecureStorageUnavailable, delete_token, load_token, save_token
 from clipboard_utils import paste_from_clipboard
 from downloader import InvalidMusicURL, download_all, format_eta, human_bytes, parse_link
 
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 BG = "#101114"
 PANEL = "#1A1C20"
 INPUT = "#23262C"
@@ -51,8 +52,10 @@ class App(ctk.CTk):
         self.link = ctk.StringVar()
         self.quality = ctk.StringVar(value="Высокое · MP3")
         self.make_subfolder = ctk.BooleanVar(value=True)
+        self.remember_login = ctk.BooleanVar(value=True)
         self._build()
         self.after(100, self._poll)
+        self.after(250, self._restore_login)
 
     def _label(self, parent, text, size=13, color=FG, bold=False, **kwargs):
         return ctk.CTkLabel(parent, text=text, font=("Arial", size, "bold" if bold else "normal"),
@@ -84,6 +87,10 @@ class App(ctk.CTk):
                         fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#141414", font=("Arial", 13, "bold"),
                         command=self.login, height=38, corner_radius=10)
         self.login_button.pack(side="right")
+        self.logout_button = ctk.CTkButton(auth_controls, text="Выйти", width=74,
+                         height=38, fg_color="#383D45", hover_color="#505660",
+                         command=self.logout, state="disabled")
+        self.logout_button.pack(side="right", padx=(0, 9))
         manual = ctk.CTkFrame(auth_inner, fg_color="transparent")
         manual.pack(fill="x", pady=(12, 0))
         self.token_entry = ctk.CTkEntry(manual, placeholder_text="Или вставьте OAuth-токен (не сохраняется)",
@@ -92,6 +99,10 @@ class App(ctk.CTk):
         self._setup_entry_clipboard(self.token_entry)
         ctk.CTkButton(manual, text="Подключить", width=118, height=36, fg_color="#383D45",
                       hover_color="#505660", command=self.login_token).pack(side="right")
+        ctk.CTkCheckBox(auth_inner, text="Запомнить вход в защищённом хранилище системы",
+                        variable=self.remember_login, fg_color=ACCENT,
+                        hover_color=ACCENT_HOVER, border_color=MUTED,
+                        text_color=FG, checkmark_color="#151515").pack(anchor="w", pady=(12, 0))
 
         task_card = ctk.CTkFrame(shell, fg_color=PANEL, corner_radius=17)
         task_card.pack(fill="x", pady=(0, 14))
@@ -100,7 +111,7 @@ class App(ctk.CTk):
         self._label(content, "02  СКАЧИВАНИЕ", size=12, color=ACCENT, bold=True).pack(anchor="w", pady=(0, 14))
         self._label(content, "Ссылка на трек, альбом или плейлист", size=13, bold=True).pack(anchor="w")
         link_row = ctk.CTkFrame(content, fg_color="transparent")
-        link_row.pack(fill="x", pady=(7, 16))
+        link_row.pack(fill="x", pady=(7, 8))
         self.link_entry = ctk.CTkEntry(link_row, textvariable=self.link,
                      placeholder_text="https://music.yandex.ru/users/.../playlists/...",
                      fg_color=INPUT, border_width=0, height=43, corner_radius=9)
@@ -109,6 +120,9 @@ class App(ctk.CTk):
         self.paste_button = ctk.CTkButton(link_row, text="Вставить", width=105, height=43,
                      fg_color="#383D45", hover_color="#505660", command=self.paste_link)
         self.paste_button.pack(side="right")
+        self.likes_button = ctk.CTkButton(content, text="♥ Скачать «Мне нравится»", height=34,
+                     width=210, fg_color="#383D45", hover_color="#505660", command=self.download_likes)
+        self.likes_button.pack(anchor="w", pady=(0, 15))
         self._label(content, "Папка сохранения", size=13, bold=True).pack(anchor="w")
         folder_row = ctk.CTkFrame(content, fg_color="transparent")
         folder_row.pack(fill="x", pady=(7, 16))
@@ -166,9 +180,6 @@ class App(ctk.CTk):
                     size=12, color=MUTED, wraplength=760).pack(anchor="w", pady=(14, 0))
 
     def _setup_entry_clipboard(self, entry):
-        """Enable dependable paste on Windows and Linux (including XWayland)."""
-        # CTkEntry wraps a native Tk entry; bind at that level so the shortcut
-        # wins over class bindings and does not paste the same text twice.
         native = entry._entry
         for sequence in ("<Control-v>", "<Control-V>", "<Control-Shift-v>",
                          "<Control-Shift-V>", "<Shift-Insert>", "<<Paste>>"):
@@ -181,7 +192,6 @@ class App(ctk.CTk):
         return "break"
 
     def paste_link(self):
-        """Visible alternative when a desktop/window manager steals Ctrl+V."""
         self.link_entry.focus_set()
         self._paste_into(self.link_entry._entry)
 
@@ -204,6 +214,31 @@ class App(ctk.CTk):
             menu.grab_release()
         return "break"
 
+    def download_likes(self):
+        self.link.set("https://music.yandex.ru/collection?type=liked")
+        self.start()
+
+    def _restore_login(self):
+        if self.auth_busy or self.client is not None:
+            return
+        self.auth_busy = True
+        self.auth_label.configure(text="Проверка сохранённого входа…", text_color=MUTED)
+        self.login_button.configure(state="disabled")
+        threading.Thread(target=self._auth_thread, kwargs={"restore": True}, daemon=True).start()
+
+    def logout(self):
+        if self.busy or self.auth_busy:
+            return
+        try:
+            delete_token()
+        except SecureStorageUnavailable as exc:
+            self.write_log("⚠ Не удалось удалить вход из хранилища: " + str(exc))
+        self.client = None
+        self.auth_label.configure(text="Выполнен выход", text_color=MUTED)
+        self.login_button.configure(text="Войти через Яндекс")
+        self.logout_button.configure(state="disabled")
+        self.write_log("■ Вы вышли из аккаунта")
+
     def write_log(self, text):
         self.log.configure(state="normal")
         self.log.insert("end", text + "\n")
@@ -215,20 +250,43 @@ class App(ctk.CTk):
         if folder:
             self.folder.set(folder)
 
-    def _auth_thread(self, token=None):
+    def _auth_thread(self, token=None, restore=False, remember=True):
         try:
             from yandex_music import Client
-            client = Client(token) if token else Client()
-            if not token:
+            if restore:
+                try:
+                    token = load_token()
+                except SecureStorageUnavailable as exc:
+                    self.events.put(("auth_restore_missing", {"message": str(exc)}))
+                    return
+                if not token:
+                    self.events.put(("auth_restore_missing", {"message": ""}))
+                    return
+            if token:
+                access_token = token
+                client = Client(token)
+            else:
+                client = Client()
                 token_obj = client.device_auth(on_code=lambda code: self.events.put(("auth_code", {
                     "url": code.verification_url, "code": code.user_code})))
-                if not token_obj or not getattr(token_obj, "access_token", None):
+                access_token = getattr(token_obj, "access_token", None)
+                if not access_token:
                     raise RuntimeError("Яндекс не подтвердил авторизацию.")
             client.init()
+            if not restore:
+                try:
+                    if remember:
+                        save_token(access_token)
+                    else:
+                        delete_token()
+                except SecureStorageUnavailable as exc:
+                    self.events.put(("auth_warning", {"message": str(exc)}))
             self.client = client
-            self.events.put(("auth_ok", {}))
+            self.events.put(("auth_ok", {"restored": restore}))
         except Exception as exc:
-            self.events.put(("auth_error", {"message": str(exc)[:260]}))
+            # Do not erase a saved token after a network/region error: the
+            # user may be able to reconnect on the next launch.
+            self.events.put(("auth_error", {"message": str(exc)[:260], "restored": restore}))
 
     def login(self):
         if self.auth_busy or self.busy:
@@ -236,7 +294,8 @@ class App(ctk.CTk):
         self.auth_busy = True
         self.login_button.configure(state="disabled", text="Авторизация…")
         self.auth_label.configure(text="Ожидание входа в аккаунт…", text_color=ACCENT)
-        threading.Thread(target=self._auth_thread, daemon=True).start()
+        threading.Thread(target=self._auth_thread,
+                         kwargs={"remember": self.remember_login.get()}, daemon=True).start()
 
     def login_token(self):
         if self.auth_busy or self.busy:
@@ -249,7 +308,8 @@ class App(ctk.CTk):
         self.auth_busy = True
         self.login_button.configure(state="disabled")
         self.auth_label.configure(text="Проверка токена…", text_color=ACCENT)
-        threading.Thread(target=self._auth_thread, args=(token,), daemon=True).start()
+        threading.Thread(target=self._auth_thread, args=(token,),
+                         kwargs={"remember": self.remember_login.get()}, daemon=True).start()
 
     def start(self):
         if self.busy or self.auth_busy:
@@ -316,12 +376,21 @@ class App(ctk.CTk):
                 elif kind == "auth_ok":
                     self.auth_busy = False
                     self.login_button.configure(state="normal", text="Войти снова")
+                    self.logout_button.configure(state="normal")
                     self.auth_label.configure(text="● Аккаунт подключён", text_color="#80E4AD")
-                    self.write_log("✓ Вход выполнен")
+                    self.write_log("✓ Вход восстановлен" if data.get("restored") else "✓ Вход выполнен")
+                elif kind == "auth_restore_missing":
+                    self.auth_busy = False
+                    self.login_button.configure(state="normal", text="Войти через Яндекс")
+                    self.auth_label.configure(text="Не выполнен вход", text_color=MUTED)
+                    if data.get("message"):
+                        self.write_log("ℹ Автовход недоступен: " + data["message"])
+                elif kind == "auth_warning":
+                    self.write_log("⚠ Вход выполнен, но не сохранён: " + data["message"])
                 elif kind == "auth_error":
                     self.auth_busy = False
                     self.login_button.configure(state="normal", text="Войти через Яндекс")
-                    self.auth_label.configure(text="Не удалось авторизоваться", text_color="#FFA6A6")
+                    self.auth_label.configure(text="Сохранённый вход истёк" if data.get("restored") else "Не удалось авторизоваться", text_color="#FFA6A6")
                     self.write_log("✕ Ошибка входа: " + data["message"])
                 elif kind == "resolved":
                     self.write_log(f"Найдено {data['count']} треков · {data['title']}")

@@ -35,35 +35,39 @@ jobs:
         run: python -m pip install -r requirements-build.txt
       - name: Run tests
         run: python -m pytest tests/ -q
-      - name: Verify clipboard Paste button in real Linux GUI
+      - name: Smoke test desktop UI and liked collection button
         if: runner.os == 'Linux'
         run: |
-          xvfb-run -a python - <<'PY'
+          xvfb-run -a python - <<'PYTEST'
           from app import App
-          url = "https://music.yandex.ru/album/42389520/track/111124021"
+          from downloader import parse_link
           app = App()
+          url = "https://music.yandex.ru/album/42389520/track/111124021"
           app.update()
           app.clipboard_clear()
           app.clipboard_append(url)
           app.update()
           app.paste_button.invoke()
-          assert app.link.get() == url, repr(app.link.get())
+          assert app.link.get() == url
+          assert parse_link("https://music.yandex.ru/collection?type=liked").kind == "likes"
+          assert app.likes_button.winfo_exists()
           app.destroy()
-          print("Desktop clipboard paste smoke test passed")
-          PY
+          print("Desktop UI and liked-playlist control passed")
+          PYTEST
       - name: Build Windows .exe
         if: runner.os == 'Windows'
         shell: pwsh
         run: >-
           python -m PyInstaller --noconfirm --clean --onefile --windowed
           --name YandexDownloader --icon assets/icon.ico --add-data assets/icon.png:assets
-          --collect-all customtkinter app.py
+          --collect-all customtkinter --collect-all keyring --collect-all mutagen app.py
       - name: Build Linux GUI
         if: runner.os == 'Linux'
         run: |
           python -m PyInstaller --noconfirm --clean --onedir --windowed \
             --name yandex-downloader --icon assets/icon.png --add-data assets/icon.png:assets \
-            --collect-all customtkinter app.py
+            --collect-all customtkinter --collect-all keyring --collect-all mutagen \
+            --collect-all secretstorage app.py
           mkdir -p release-linux
           cp -a dist/yandex-downloader release-linux/
           cp install-omarchy-binary.sh release-linux/
@@ -98,8 +102,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: v1.0.3
-          name: Yandex Downloader v1.0.3 (desktop clipboard fix)
+          tag_name: v1.0.4
+          name: Yandex Downloader v1.0.4 (likes, tags, saved login)
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           fail_on_unmatched_files: true

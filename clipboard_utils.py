@@ -1,22 +1,14 @@
-"""Testable clipboard insertion shared by native Tk entries in the desktop UI."""
-from __future__ import annotations
-
+"""Paste from clipboard at the caret, replacing selection when present."""
 import tkinter as tk
-from typing import Callable
 
 
-def paste_from_clipboard(entry, clipboard_get: Callable[[], str]) -> bool:
-    """Paste at the caret, replacing selected text; never clear the clipboard.
-
-    Returns False for an empty/unavailable clipboard instead of raising TclError.
-    """
+def paste_from_clipboard(entry, clipboard_get):
     try:
         value = clipboard_get()
     except (tk.TclError, UnicodeError):
         return False
     if not isinstance(value, str) or not value:
         return False
-
     try:
         first = entry.index("sel.first")
     except tk.TclError:

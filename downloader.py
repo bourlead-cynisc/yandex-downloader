@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import requests
 
@@ -38,6 +38,10 @@ class TrackItem:
     title: str
     artist: str
     track_id: str
+    album: str = ""
+    album_artist: str = ""
+    year: str = ""
+    track_number: str = ""
 
 
 def parse_link(link: str) -> Link:
@@ -49,6 +53,11 @@ def parse_link(link: str) -> Link:
     if (parts.hostname or "").lower() not in {"music.yandex.ru", "music.yandex.com", "music.yandex.kz", "music.yandex.by"}:
         raise InvalidMusicURL("Ссылка должна вести на music.yandex.ru (или другой домен Яндекс Музыки).")
     path = [unquote(p) for p in parts.path.split("/") if p]
+    # Liked tracks are the user's library, not a public playlist.
+    if path in (["collection"], ["collection", "tracks"], ["collection", "liked"]):
+        parameters = parse_qs(parts.query)
+        if path != ["collection"] or parameters.get("type", ["liked"])[0] in ("liked", "tracks"):
+            return Link("likes", "liked")
     if not path:
         raise InvalidMusicURL("В ссылке нет идентификатора трека или плейлиста.")
     # /album/123/track/456; /track/456
@@ -60,12 +69,16 @@ def parse_link(link: str) -> Link:
     if len(path) >= 4 and path[0] == "users" and path[2] == "playlists":
         if not re.fullmatch(r"[\w.@-]{1,128}", path[1]) or not path[3].isdigit():
             raise InvalidMusicURL("Неизвестный формат ссылки на плейлист.")
+        if path[3] == "3":
+            return Link("likes", "liked", path[1])
         return Link("playlist", path[3], path[1])
     # /playlists/UID:KIND; /playlists/<UUID>
     if len(path) >= 2 and path[0] == "playlists":
         value = path[1]
         if re.fullmatch(r"\d+:\d+", value):
             owner, ident = value.split(":", 1)
+            if ident == "3":
+                return Link("likes", "liked", owner)
             return Link("playlist", ident, owner)
         if re.fullmatch(r"[a-fA-F0-9-]{32,36}", value):
             return Link("playlist_uuid", value)
@@ -89,11 +102,58 @@ def track_item(track: object) -> TrackItem:
     title = getattr(track, "title", None) or "Без названия"
     artists = getattr(track, "artists", None) or []
     artist = ", ".join(str(getattr(a, "name", "")) for a in artists if getattr(a, "name", "")) or "Неизвестный исполнитель"
-    return TrackItem(track=track, title=str(title), artist=artist, track_id=str(getattr(track, "id", "")))
+    albums = getattr(track, "albums", None) or []
+    album = albums[0] if albums else None
+    album_title = getattr(album, "title", None) or ""
+    album_artists = getattr(album, "artists", None) or []
+    album_artist = ", ".join(str(getattr(a, "name", "")) for a in album_artists if getattr(a, "name", "")) or artist
+    year = str(getattr(album, "year", "") or "")
+    position = getattr(track, "track_position", None)
+    number = getattr(position, "index", None) or getattr(track, "track_number", None) or ""
+    return TrackItem(track=track, title=str(title), artist=artist,
+                     track_id=str(getattr(track, "id", "")), album=str(album_title),
+                     album_artist=album_artist, year=year, track_number=str(number))
+
+
+def _liked_tracks(client: object, owner: str = "") -> list[TrackItem]:
+    """Resolve liked TrackShort items, including large libraries, in API batches."""
+    result = client.users_likes_tracks(user_id=owner) if owner else client.users_likes_tracks()
+    shorts = getattr(result, "tracks", result) or []
+    # Keep the original order of liked tracks, even if API batch responses
+    # arrive shuffled or some IDs are not available to the current account.
+    ordered: list[tuple[str, TrackItem | None]] = []
+    ids: list[str] = []
+    for short in shorts:
+        if not short:
+            continue
+        track = getattr(short, "track", None)
+        if track and getattr(track, "title", None):
+            ordered.append((str(getattr(track, "id", "")), track_item(track)))
+            continue
+        ident = getattr(short, "track_id", None) or getattr(short, "id", None)
+        if ident:
+            ident = str(ident)
+            ids.append(ident)
+            ordered.append((ident, None))
+        elif hasattr(short, "fetch_track"):
+            full = short.fetch_track()
+            if full:
+                ordered.append((str(getattr(full, "id", "")), track_item(full)))
+    fetched: dict[str, TrackItem] = {}
+    for offset in range(0, len(ids), 100):
+        for track in client.tracks(ids[offset:offset + 100]) or []:
+            if track:
+                item = track_item(track)
+                fetched[item.track_id] = item
+    return [item or fetched.get(ident.split(":", 1)[0])
+            for ident, item in ordered
+            if item or ident.split(":", 1)[0] in fetched]
 
 
 def resolve_link(client: object, link: Link) -> tuple[str, list[TrackItem]]:
     """Return folder title and full track objects. Service can omit unavailable entries."""
+    if link.kind == "likes":
+        return "Мне нравится", _liked_tracks(client, link.owner)
     if link.kind == "track":
         tracks = client.tracks([link.item_id]) or []
         return "Один трек", [track_item(t) for t in tracks if t]
@@ -207,6 +267,34 @@ def _stream_url(url: str, temp_path: Path, on_bytes: Callable[[int, int | None, 
     return read
 
 
+def write_audio_tags(path: Path, item: TrackItem, *, missing_only: bool = False) -> bool:
+    """Write real audio metadata (ID3/Vorbis/MP4), not just an audio filename.
+
+    Unsupported or malformed audio is left intact. This is important for
+    preserving a downloaded file if the service changes its format.
+    """
+    from mutagen import File as AudioFile
+    from mutagen import MutagenError
+
+    try:
+        # `easy=True` normalizes common tags across MP3, FLAC, and M4A.
+        audio = AudioFile(path, easy=True)
+        if audio is None:
+            return False
+        if audio.tags is None:
+            audio.add_tags()
+        fields = {"title": item.title, "artist": item.artist,
+                  "album": item.album, "albumartist": item.album_artist,
+                  "date": item.year, "tracknumber": item.track_number}
+        for key, value in fields.items():
+            if value and (not missing_only or not audio.get(key)):
+                audio[key] = [str(value)]
+        audio.save()
+        return True
+    except (MutagenError, ValueError, KeyError, TypeError, OSError):
+        return False
+
+
 def download_one(client: object, item: TrackItem, folder: Path, quality: str,
                  progress: Callable[[int, int | None, float], None], cancel: threading.Event) -> tuple[Path, int, bool]:
     """Use temp files + atomic rename; never overwrite a pre-existing music file."""
@@ -215,6 +303,8 @@ def download_one(client: object, item: TrackItem, folder: Path, quality: str,
     filename = f"{name} [{safe_name(item.track_id, 32)}]{_extension(codec)}"
     output = folder / filename
     if output.exists():
+        # Repair missing metadata on files downloaded by older versions.
+        write_audio_tags(output, item, missing_only=True)
         return output, output.stat().st_size, True
     part = folder / (filename + ".part")
     try:
@@ -234,9 +324,12 @@ def download_one(client: object, item: TrackItem, folder: Path, quality: str,
             size = _stream_url(url, part, progress, cancel)
         if size <= 0:
             raise RuntimeError("Получен пустой файл.")
+        # Write tags before publish so media players can read artist/title/album.
+        # Mutagen may add ID3 frames, so the resulting file can grow slightly.
+        write_audio_tags(part, item)
         # Atomic rename. Each track has a distinct ID in the filename.
         os.replace(part, output)
-        return output, size, False
+        return output, output.stat().st_size, False
     except Exception:
         part.unlink(missing_ok=True)
         raise

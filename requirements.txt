@@ -1,0 +1,3 @@
+customtkinter>=5.2,<6
+yandex-music[crypto]>=3.2.2,<4
+requests>=2.31,<3

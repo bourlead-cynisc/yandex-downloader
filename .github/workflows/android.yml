@@ -1,0 +1,49 @@
+name: Build Android APK
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build installable APK
+        working-directory: android
+        run: gradle :app:assembleDebug --stacktrace --no-daemon
+      - name: Rename APK
+        run: |
+          test -s android/app/build/outputs/apk/debug/app-debug.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk YandexDownloader-Android-v1.0.2.apk
+          sha256sum YandexDownloader-Android-v1.0.2.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YandexDownloader-Android-v1.0.2
+          path: YandexDownloader-Android-v1.0.2.apk
+          if-no-files-found: error
+          retention-days: 30
+      - name: Attach to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v1.0.2 >/dev/null 2>&1 || gh release create v1.0.2 --target "$GITHUB_SHA" --title "Yandex Downloader v1.0.2 · Android" --notes "Android test APK (arm64-v8a, Android 8.0+). See README for limitations. Windows and Linux versions are available in v1.0.1."
+          gh release upload v1.0.2 YandexDownloader-Android-v1.0.2.apk --clobber

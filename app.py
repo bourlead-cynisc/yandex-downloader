@@ -11,10 +11,11 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from clipboard_utils import paste_from_clipboard
 from downloader import InvalidMusicURL, download_all, format_eta, human_bytes, parse_link
 
 
-VERSION = "1.0.1"
+VERSION = "1.0.3"
 BG = "#101114"
 PANEL = "#1A1C20"
 INPUT = "#23262C"
@@ -88,6 +89,7 @@ class App(ctk.CTk):
         self.token_entry = ctk.CTkEntry(manual, placeholder_text="Или вставьте OAuth-токен (не сохраняется)",
                             show="•", fg_color=INPUT, border_width=0, height=36, corner_radius=9)
         self.token_entry.pack(side="left", fill="x", expand=True, padx=(0, 9))
+        self._setup_entry_clipboard(self.token_entry)
         ctk.CTkButton(manual, text="Подключить", width=118, height=36, fg_color="#383D45",
                       hover_color="#505660", command=self.login_token).pack(side="right")
 
@@ -97,13 +99,23 @@ class App(ctk.CTk):
         content.pack(fill="x", padx=22, pady=20)
         self._label(content, "02  СКАЧИВАНИЕ", size=12, color=ACCENT, bold=True).pack(anchor="w", pady=(0, 14))
         self._label(content, "Ссылка на трек, альбом или плейлист", size=13, bold=True).pack(anchor="w")
-        ctk.CTkEntry(content, textvariable=self.link, placeholder_text="https://music.yandex.ru/users/.../playlists/...",
-                     fg_color=INPUT, border_width=0, height=43, corner_radius=9).pack(fill="x", pady=(7, 16))
+        link_row = ctk.CTkFrame(content, fg_color="transparent")
+        link_row.pack(fill="x", pady=(7, 16))
+        self.link_entry = ctk.CTkEntry(link_row, textvariable=self.link,
+                     placeholder_text="https://music.yandex.ru/users/.../playlists/...",
+                     fg_color=INPUT, border_width=0, height=43, corner_radius=9)
+        self.link_entry.pack(side="left", fill="x", expand=True, padx=(0, 9))
+        self._setup_entry_clipboard(self.link_entry)
+        self.paste_button = ctk.CTkButton(link_row, text="Вставить", width=105, height=43,
+                     fg_color="#383D45", hover_color="#505660", command=self.paste_link)
+        self.paste_button.pack(side="right")
         self._label(content, "Папка сохранения", size=13, bold=True).pack(anchor="w")
         folder_row = ctk.CTkFrame(content, fg_color="transparent")
         folder_row.pack(fill="x", pady=(7, 16))
-        ctk.CTkEntry(folder_row, textvariable=self.folder, fg_color=INPUT, border_width=0,
-                     height=43, corner_radius=9).pack(side="left", fill="x", expand=True, padx=(0, 9))
+        self.folder_entry = ctk.CTkEntry(folder_row, textvariable=self.folder, fg_color=INPUT,
+                     border_width=0, height=43, corner_radius=9)
+        self.folder_entry.pack(side="left", fill="x", expand=True, padx=(0, 9))
+        self._setup_entry_clipboard(self.folder_entry)
         ctk.CTkButton(folder_row, text="Обзор…", width=105, height=43, fg_color="#383D45",
                       hover_color="#505660", command=self.choose_folder).pack(side="right")
         row = ctk.CTkFrame(content, fg_color="transparent")
@@ -152,6 +164,45 @@ class App(ctk.CTk):
 
         self._label(shell, "Используйте только музыку, которую вправе сохранять. Доступность файлов определяет Яндекс Музыка.",
                     size=12, color=MUTED, wraplength=760).pack(anchor="w", pady=(14, 0))
+
+    def _setup_entry_clipboard(self, entry):
+        """Enable dependable paste on Windows and Linux (including XWayland)."""
+        # CTkEntry wraps a native Tk entry; bind at that level so the shortcut
+        # wins over class bindings and does not paste the same text twice.
+        native = entry._entry
+        for sequence in ("<Control-v>", "<Control-V>", "<Control-Shift-v>",
+                         "<Control-Shift-V>", "<Shift-Insert>", "<<Paste>>"):
+            native.bind(sequence, lambda event, target=native: self._paste_into(target), add="+")
+        native.bind("<Button-3>", lambda event, target=native:
+                    self._show_entry_context_menu(event, target), add="+")
+
+    def _paste_into(self, native):
+        paste_from_clipboard(native, self.clipboard_get)
+        return "break"
+
+    def paste_link(self):
+        """Visible alternative when a desktop/window manager steals Ctrl+V."""
+        self.link_entry.focus_set()
+        self._paste_into(self.link_entry._entry)
+
+    def _show_entry_context_menu(self, event, native):
+        native.focus_set()
+        if getattr(self, "_context_menu", None) is not None:
+            self._context_menu.destroy()
+        menu = tk.Menu(self, tearoff=False, bg=INPUT, fg=FG,
+                       activebackground=ACCENT, activeforeground="#151515")
+        self._context_menu = menu
+        menu.add_command(label="Вырезать", command=lambda: native.event_generate("<<Cut>>"))
+        menu.add_command(label="Копировать", command=lambda: native.event_generate("<<Copy>>"))
+        menu.add_command(label="Вставить", command=lambda: self._paste_into(native))
+        menu.add_separator()
+        menu.add_command(label="Выделить всё", command=lambda: (native.select_range(0, "end"),
+                                                               native.icursor("end")))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
 
     def write_log(self, text):
         self.log.configure(state="normal")
